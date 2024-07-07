@@ -13,6 +13,7 @@ type Game struct {
 	lobby        *Room
 	mu           sync.Mutex
 	inputChannel chan InputEvent
+	commands 	 map[string]command
 }
 
 type Session struct {
@@ -45,6 +46,12 @@ func NewGame() *Game {
 		usernames:    make(map[string]*Session),
 		lobby:        &Room{Name: "Lobby", Sessions: make(map[string]*Session)},
 		inputChannel: make(chan InputEvent, 100),
+		commands: map[string]command{
+			"whisper": handleWhisper,
+			"who":     handleListUsersInRoom,
+			"help":    handleHelp,
+			"quit":    handleQuit,
+		},
 	}
 	go g.processEvents()
 	return g
@@ -123,102 +130,31 @@ func (g *Game) handleInput(event InputEvent) {
 	}
 }
 
-func (g *Game) handleCommand(session *Session, command string) ([]OutputEvent, bool) {
-	parts := strings.Split(command, " ")
+func (g *Game) handleCommand(session *Session, inputString string) ([]OutputEvent, bool) {
+
+	parts := strings.Split(inputString, " ")
 	cmd := parts[0]
-	switch cmd {
-	case "whisper":
-		log.Printf("User %s issued say command %+v", session.Name, parts)
-		if len(parts) < 2 {
-			return []OutputEvent{{
-				SessionID: session.ID,
-				Message:   "Usage: /say <username> <message>",
-			}}, false
-		}
-		targetUsername := parts[1]
-		message := strings.Join(parts[2:], " ")
-		return g.handleWhisper(session, targetUsername, message), false
-	case "who":
-		log.Printf("User %s requested list of users in room %s", session.Name, session.Room.Name)
-		return []OutputEvent{g.handleListUsersInRoom(session)}, false
-	case "help":
-		if len(parts) > 1 {
-			switch parts[1] {
-			case "whisper":
-				return []OutputEvent{{
-					SessionID: session.ID,
-					Message:   "Usage: /whisper <username> <message>",
-				}}, false
-			case "who":
-				return []OutputEvent{{
-					SessionID: session.ID,
-					Message:   "Usage: /who",
-				}}, false
-			case "quit":
-				return []OutputEvent{{
-					SessionID: session.ID,
-					Message:   "Usage: /quit",
-				}}, false
-			default:
-				return []OutputEvent{{
-					SessionID: session.ID,
-					Message:   fmt.Sprintf("Unknown command: %s", parts[1]),
-				}}, false
-			}
-		} else {
-			return []OutputEvent{{
-				SessionID: session.ID,
-				Message:   "Available commands: /whisper <username> <message>, /who, /quit",
-			}}, false
-		}
-	case "quit":
-		return []OutputEvent{{
-			SessionID: session.ID,
-			Message:   "Goodbye!",
-			Quit:      true,
-		}}, true
-	default:
-		return []OutputEvent{{
+	params := strings.Join(parts[1:], " ")
+	var outputEvents []OutputEvent
+
+	if command, exists := g.commands[cmd]; exists {
+		outputEvents = command(g, session, params, false)
+	} else {
+		outputEvents = []OutputEvent{{
 			SessionID: session.ID,
 			Message:   fmt.Sprintf("Unknown command: %s", cmd),
-		}}, false
-	}
-}
-
-func (g *Game) handleListUsersInRoom(session *Session) OutputEvent {
-	userList := []string{}
-	for _, s := range session.Room.Sessions {
-		userList = append(userList, s.Name)
-	}
-	return OutputEvent{
-		SessionID: session.ID,
-		Message:   fmt.Sprintf("Users in this room: %s", strings.Join(userList, ", ")),
-	}
-}
-
-func (g *Game) handleWhisper(session *Session, targetUsername, message string) []OutputEvent {
-	log.Print("handleSayCommand")
-
-	targetSession, exists := g.usernames[targetUsername]
-	log.Printf("User %s wants to send a private message to %s: %s", session.Name, targetUsername, message)
-	if !exists {
-		return []OutputEvent{{
-			SessionID: session.ID,
-			Message:   fmt.Sprintf("User '%s' not found.", targetUsername),
 		}}
 	}
 
-	// Send message to target user
-	return []OutputEvent{
-		{
-			SessionID: targetSession.ID,
-			Message:   fmt.Sprintf("%s whispers: %s", session.Name, message),
-		},
-		{
-			SessionID: session.ID,
-			Message:   fmt.Sprintf("You whispered to %s: %s", targetUsername, message),
-		},
+	var quit bool
+	for _, output := range outputEvents {
+		if output.Quit {
+			quit = true
+			break
+		}
 	}
+
+	return outputEvents, quit
 }
 
 func (g *Game) collectBroadcastMessages(room *Room, message string, excludeID string) []OutputEvent {
