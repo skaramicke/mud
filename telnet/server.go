@@ -28,20 +28,26 @@ func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	sessionID := conn.RemoteAddr().String()
-	fmt.Fprintf(conn, "Welcome to the MUD server!\nPlease enter your name: ")
+	fmt.Fprintf(conn, "Welcome to the MUD server!\n")
 
 	reader := bufio.NewReader(conn)
-	name, err := reader.ReadString('\n')
-	if err != nil {
-		log.Printf("Error reading name: %v", err)
+
+	// Send the name to the game and wait for confirmation
+	responseChan := make(chan bool)
+	s.game.GetInputChannel() <- game.InputEvent{SessionID: sessionID, Input: "", ResponseChan: responseChan}
+
+	// Wait for the game to process the new session
+	if !<-responseChan {
+		log.Printf("Failed to create session for %s", sessionID)
 		return
 	}
-	name = strings.TrimSpace(name)
-
-	s.game.GetInputChannel() <- game.InputEvent{SessionID: sessionID, Input: name}
 
 	// Get a dedicated output channel for this session
-	outputChan := s.game.GetOutputChannel(sessionID)
+	outputChan, exists := s.game.GetOutputChannel(sessionID)
+	if !exists {
+		log.Printf("Failed to get output channel for session %s", sessionID)
+		return
+	}
 
 	// Create a channel to signal when to quit
 	quitChan := make(chan bool)
@@ -71,14 +77,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 			continue
 		}
 
-		log.Printf("Received from %s: %s", name, input)
+		log.Printf("Received from %s: %s", sessionID, input)
 		s.game.GetInputChannel() <- game.InputEvent{SessionID: sessionID, Input: input}
 	}
 
 	// Signal handleOutgoing to stop
 	close(quitChan)
 
-	log.Printf("Connection closed for %s", name)
+	log.Printf("Connection closed for %s", sessionID)
 }
 
 // isClosedConnError checks if the error is due to a closed connection
@@ -91,33 +97,33 @@ func isClosedConnError(err error) bool {
 
 func (s *Server) handleOutgoing(conn net.Conn, outputChan <-chan game.OutputEvent, quitChan <-chan bool) {
 	for {
-			select {
-			case <-quitChan:
-					return
-			case output, ok := <-outputChan:
-					if !ok {
-							return
-					}
-					_, err := fmt.Fprintf(conn, "%s\n", output.Message)
-					if err != nil {
-							log.Printf("Error writing to connection: %v", err)
-							return
-					}
-					if output.Quit {
-							// Send Telnet End of Session command
-							_, err := conn.Write([]byte{255, 244, 255, 253, 6})
-							if err != nil {
-									log.Printf("Error sending End of Session command: %v", err)
-							}
-							// Flush the connection
-							if flusher, ok := conn.(interface{ Flush() error }); ok {
-									flusher.Flush()
-							}
-							// Close the connection
-							conn.Close()
-							return
-					}
+		select {
+		case <-quitChan:
+			return
+		case output, ok := <-outputChan:
+			if !ok {
+				return
 			}
+			_, err := fmt.Fprintf(conn, "%s\n", output.Message)
+			if err != nil {
+				log.Printf("Error writing to connection: %v", err)
+				return
+			}
+			if output.Quit {
+				// Send Telnet End of Session command
+				_, err := conn.Write([]byte{255, 244, 255, 253, 6})
+				if err != nil {
+					log.Printf("Error sending End of Session command: %v", err)
+				}
+				// Flush the connection
+				if flusher, ok := conn.(interface{ Flush() error }); ok {
+					flusher.Flush()
+				}
+				// Close the connection
+				conn.Close()
+				return
+			}
+		}
 	}
 }
 
